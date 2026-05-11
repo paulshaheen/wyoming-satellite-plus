@@ -1,0 +1,73 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "data": {
+          "host": "Host",
+          "port": "Port"
+        }
+      },
+      "zeroconf_confirm": {
+        "description": "Do you want to add {name}?"
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect",
+      "no_services": "No supported services found"
+    },
+    "abort": {
+      "already_configured": "Device is already configured",
+      "no_port": "No port in discovery info",
+      "no_services": "No supported services found"
+    }
+  },
+  "entity": {
+    "assist_satellite": {
+      "assist_satellite": {
+        "name": "[%key:component::assist_satellite::entity::assist_satellite::assist_satellite::name%]",
+        "state": {
+          "idle": "[%key:component::assist_satellite::entity::assist_satellite::assist_satellite::state::idle%]",
+          "listening": "[%key:component::assist_satellite::entity::assist_satellite::assist_satellite::state::listening%]",
+          "processing": "[%key:component::assist_satellite::entity::assist_satellite::assist_satellite::state::processing%]",
+          "responding": "[%key:component::assist_satellite::entity::assist_satellite::assist_satellite::state::responding%]"
+        }
+      }
+    },
+    "binary_sensor": {
+      "assist_in_progress": {
+        "name": "Assist in progress"
+      }
+    },
+    "select": {
+      "noise_suppression_level": {
+        "name": "Noise suppression level",
+        "state": {
+          "off": "Off",
+          "low": "Low",
+          "medium": "Medium",
+          "high": "High",
+          "max": "Max"
+        }
+      },
+      "pipeline": {
+        "name": "Pipeline"
+      },
+      "vad_sensitivity": {
+        "name": "VAD sensitivity"
+      }
+    },
+    "number": {
+      "auto_gain": {
+        "name": "Auto gain"
+      },
+      "volume_multiplier": {
+        "name": "Volume multiplier"
+      }
+    },
+    "switch": {
+      "mute": {
+        "name": "Mute"
+      }
+    }
+  }
+}

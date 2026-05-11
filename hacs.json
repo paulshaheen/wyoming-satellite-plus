@@ -1,0 +1,7 @@
+{
+  "name": "Wyoming Satellite Plus",
+  "content_in_root": false,
+  "render_readme": true,
+  "domains": ["assist_satellite"],
+  "homeassistant": "2024.6.0"
+}

@@ -1,0 +1,18 @@
+{
+  "domain": "wyoming_satellite_plus",
+  "name": "Wyoming Satellite Plus",
+  "codeowners": ["@pwshaheen"],
+  "config_flow": true,
+  "dependencies": [
+    "assist_satellite",
+    "assist_pipeline",
+    "intent",
+    "conversation",
+    "ffmpeg"
+  ],
+  "documentation": "https://github.com/pwshaheen/wyoming-satellite-plus",
+  "integration_type": "service",
+  "iot_class": "local_push",
+  "requirements": ["wyoming==1.7.2"],
+  "version": "1.0.0"
+}
