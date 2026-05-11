@@ -138,6 +138,9 @@ class WyomingAssistSatellite(WyomingSatelliteEntity, AssistSatelliteEntity):
         self._tts_stream_token: str | None = None
         self._is_tts_streaming: bool = False
 
+        # Last TTS text — used to auto-trigger conversation continuation
+        self._last_tts_text: str = ""
+
     @property
     def pipeline_entity_id(self) -> str | None:
         """Return the entity ID of the pipeline to use for the next conversation."""
@@ -279,9 +282,18 @@ class WyomingAssistSatellite(WyomingSatelliteEntity, AssistSatelliteEntity):
                     self._stream_tts(stream),
                     f"{self.entity_id} {event.type}",
                 )
+            elif event.data and event.data.get("tts_start_streaming"):
+                _LOGGER.warning(
+                    "INTENT_PROGRESS tts_start_streaming=True but stream not found. "
+                    "token=%s, stream=%s",
+                    self._tts_stream_token,
+                    tts.async_get_stream(self.hass, self._tts_stream_token),
+                )
         elif event.type == assist_pipeline.PipelineEventType.TTS_START:
             # Text-to-speech text
             if event.data:
+                # Cache TTS text for post-response continuation check
+                self._last_tts_text = event.data.get("tts_input", "")
                 # Inform client of text
                 self.config_entry.async_create_background_task(
                     self.hass,
@@ -496,6 +508,34 @@ class WyomingAssistSatellite(WyomingSatelliteEntity, AssistSatelliteEntity):
 
     # -------------------------------------------------------------------------
 
+
+    async def _start_conversation_after_question(self) -> None:
+        """Open the mic immediately after Jarvis asks a follow-up question.
+
+        No announcement, no preannounce chime — just send RunPipeline(ASR)
+        to the satellite so it opens the mic, then run an STT pipeline
+        against the incoming audio using the existing conversation ID so
+        the context is preserved.
+        """
+        if self._client is None:
+            _LOGGER.debug("_start_conversation_after_question: no client, skipping")
+            return
+
+        _LOGGER.debug("Sending RunPipeline(ASR) for conversation continuation")
+        await self._client.write_event(
+            RunPipeline(
+                start_stage=PipelineStage.ASR,
+                end_stage=PipelineStage.TTS,
+            ).event()
+        )
+
+        # Launch STT pipeline — audio will arrive from satellite as usual
+        self._run_pipeline_once(
+            RunPipeline(
+                start_stage=PipelineStage.ASR,
+                end_stage=PipelineStage.TTS,
+            )
+        )
 
     async def async_start_conversation(
         self, start_announcement: AssistSatelliteAnnouncement
@@ -713,6 +753,21 @@ class WyomingAssistSatellite(WyomingSatelliteEntity, AssistSatelliteEntity):
 
                     if self._played_event_received is not None:
                         self._played_event_received.set()
+
+                    # Auto-continue conversation if Jarvis asked a question
+                    if (
+                        self._last_tts_text.rstrip().endswith("?")
+                        and not self._is_pipeline_running
+                    ):
+                        _LOGGER.debug(
+                            "TTS ended with '?', auto-continuing conversation"
+                        )
+                        self._last_tts_text = ""  # consume
+                        self.config_entry.async_create_background_task(
+                            self.hass,
+                            self._start_conversation_after_question(),
+                            "wyoming satellite plus conversation continuation",
+                        )
                 else:
                     _LOGGER.debug("Unexpected event from satellite: %s", client_event)
 
@@ -790,6 +845,10 @@ class WyomingAssistSatellite(WyomingSatelliteEntity, AssistSatelliteEntity):
             return
 
         if tts_result.extension != "wav":
+            _LOGGER.warning(
+                "_stream_tts: expected wav, got %s — satellite cannot play this format",
+                tts_result.extension,
+            )
             raise ValueError(
                 f"Cannot stream audio format to satellite: {tts_result.extension}"
             )
