@@ -1,116 +1,115 @@
-# wyoming-satellite-plus: Conversation Continuation — Handoff Notes
-# Generated 2026-05-11 14:08 EDT by Jarvis
+# wyoming-satellite-plus: Conversation Continuation — RESOLVED
+# Last updated 2026-05-11 14:32 EDT by Jarvis
 
-## What works
-- wake word ("Hey Jarvis") → STT → Claude → TTS → done chime ✅
-- "Turn on/off the lights" → Claude asks "Which lights?" ✅  
-- supported_features = 3 (ANNOUNCE | START_CONVERSATION) ✅
-- GitHub: https://github.com/paulshaheen/wyoming-satellite-plus ✅
+## Status: ✅ WORKING
 
-## What does NOT work
-After Jarvis asks a follow-up question (e.g. "Which lights?"), the satellite
-does NOT automatically open the mic. Paul has to say "Hey Jarvis" again,
-which loses conversation context and the done chime doesn't play.
+End-to-end conversation continuation works. After Jarvis asks a follow-up
+question (e.g. "Which lights?"), the satellite mic auto-opens with no need
+to re-say "Hey Jarvis". Conversation context is preserved.
 
-## Root cause, diagnosed
-The continuation logic lives in `_stream_tts()` inside
-`custom_components/wyoming_satellite_plus/assist_satellite.py`.
+Verified flow:
+1. "Hey Jarvis, turn off the lights"
+2. Claude → "Which lights?" (TTS plays + done chime)
+3. Mic auto-opens (no wake word needed)
+4. "Office light"
+5. Light turns off ✅
 
-After sending AudioStop to the satellite, we check if the TTS text ended
-with "?" and if so call `_continue_after_playback()`. But that method was
-never fully written — the handoff happened mid-edit.
+## Root cause (the actual one)
 
-The satellite does NOT reliably send a `Played` event back through the
-wyoming TCP connection (the audio plays via a separate SSH paplay process).
-So we cannot use `Played` as the trigger. We must trigger from `_stream_tts`
-after `AudioStop` is sent.
+Two separate bugs had to be fixed:
 
-## What was in progress at handoff
-`_stream_tts` was edited to call `self._continue_after_playback(playback_wait)`
-after AudioStop — but `_continue_after_playback()` was never written.
+### Bug 1: HA-side custom integration didn't kick off a follow-up pipeline.
 
-Also needed: after `_continue_after_playback` fires, the continuation must
-NOT clear `self._conversation_id` (base class attribute) — we need the same
-conversation session so Claude has context for the follow-up answer.
+Fixed in `custom_components/wyoming_satellite_plus/assist_satellite.py`:
+- Capture last TTS text on `intent-end` event into `self._last_tts_text`
+- On `Played` event from satellite: if text ends with `?`, schedule
+  `_start_conversation_after_question()`
+- That method writes `RunPipeline(start_stage=ASR)` to the satellite over
+  the existing wyoming TCP connection AND kicks off a local STT pipeline
+  via `_run_pipeline_once()`.
 
-## Files involved
-All on HA host at: /homeassistant/custom_components/wyoming_satellite_plus/
-Primary file: assist_satellite.py
-Local copy:   workspace/wyoming-satellite-plus/custom_components/wyoming_satellite_plus/assist_satellite.py
+Note: the original handoff doc incorrectly claimed the `Played` event was
+unreliable. It IS reliably sent — the snd subprocess on the satellite exits
+after paplay finishes, which triggers the wyoming-satellite to send `Played`
+back to HA. See `wyoming_satellite/satellite.py` line 623 (snd loop).
 
-## What needs to be written
+### Bug 2: wyoming-satellite ignored server-initiated RunPipeline.
 
-### 1. `_continue_after_playback(playback_wait: float)` method
-```python
-async def _continue_after_playback(self, playback_wait: float) -> None:
-    """Wait for pipeline to end + audio to finish playing, then open mic."""
-    # Wait for pipeline RUN_END (base class sets _is_pipeline_running=False
-    # and fires _pipeline_ended_event on RUN_END pipeline event).
-    try:
-        async with asyncio.timeout(10):
-            await self._pipeline_ended_event.wait()
-    except TimeoutError:
-        _LOGGER.warning("_continue_after_playback: pipeline did not end in time")
-        return
+`WakeStreamingSatellite.event_from_server` in wyoming-satellite only flips
+`self.is_streaming = True` after a real wake-word `Detection` from the
+local openwakeword service. A server-pushed `RunPipeline(start_stage=ASR)`
+was silently ignored.
 
-    # Extra buffer so satellite finishes playing the TTS audio
-    await asyncio.sleep(playback_wait)
+Fixed by patching the satellite's `event_from_server` to detect that case
+and immediately:
+- Set `self.is_streaming = True`
+- Call `self.trigger_streaming_start()`
+- Return early (skip wake-word path entirely)
 
-    # Now open the mic for follow-up
-    await self._start_conversation_after_question()
+Patch lives at `patches/satellite_continuation.patch.py`. Idempotent
+(checks for `# WSP_CONTINUATION_PATCH_v1` sentinel).
+
+### ⚠️ CRITICAL GOTCHA
+
+The wyoming-satellite systemd unit runs:
+
+    /opt/wyoming-satellite/.venv/bin/python -m wyoming_satellite
+
+Python imports the `wyoming_satellite` package from the venv's
+`site-packages/`, NOT from `/opt/wyoming-satellite/wyoming_satellite/`
+(which is the source tree from the git clone).
+
+The path that matters is:
+
+    /opt/wyoming-satellite/.venv/lib/python3.11/site-packages/wyoming_satellite/satellite.py
+
+We initially patched the source tree and the patch did nothing. Lost ~2
+hours chasing imaginary TCP bugs. The patch script now hard-codes the
+venv path.
+
+## Files
+
+### HA host (10.0.0.54), in docker container `homeassistant`
+- `/homeassistant/custom_components/wyoming_satellite_plus/assist_satellite.py`
+  (40070 bytes; mirror in `workspace/wyoming-satellite-plus/...` is canonical)
+
+### jarvis-lxc (10.0.0.219)
+- `/opt/wyoming-satellite/.venv/lib/python3.11/site-packages/wyoming_satellite/satellite.py`
+  (patched in place; backups at `.bak.<timestamp>` in source tree)
+- Service: `wyoming-satellite.service` + `wyoming-openwakeword.service`
+
+## Re-applying patches after wyoming-satellite upgrade
+
+If wyoming-satellite is reinstalled or upgraded in the venv, our patch will
+be wiped. Re-apply with:
+
+```bash
+# Copy patches/satellite_continuation.patch.py to jarvis-lxc, then:
+ssh root@10.0.0.219 'python3 /tmp/satellite_continuation.patch.py && systemctl restart wyoming-satellite.service'
 ```
 
-### 2. `_start_conversation_after_question()` already exists — keep as-is
-It sends RunPipeline(ASR) to the satellite and calls _run_pipeline_once().
-The base class `async_accept_pipeline_from_satellite` will reuse
-`self._conversation_id` automatically (set from the previous pipeline run),
-so Claude gets context.
+The script is idempotent (sentinel check) — safe to re-run.
 
-### 3. Verify `_last_tts_text` is captured correctly
-In `on_pipeline_event` at `TTS_START`:
-    self._last_tts_text = event.data.get("tts_input", "")
+## Reload caveat for HA custom component
 
-In `_stream_tts` after AudioStop is sent:
-    tts_text = self._last_tts_text
-    if tts_text.rstrip().endswith("?"):
-        self._last_tts_text = ""   # consume
-        playback_wait = max(total_seconds, 0.5) + 0.5
-        self.config_entry.async_create_background_task(
-            self.hass,
-            self._continue_after_playback(playback_wait),
-            "wyoming satellite plus conversation continuation",
-        )
+`homeassistant.reload_all` and config-entry reload do NOT reload Python
+modules from `custom_components/`. After editing `assist_satellite.py`,
+you must restart Home Assistant fully:
 
-## Deploy procedure (NO full HA restart needed)
-1. Edit the file locally
-2. scp to jarvis-lxc (root@10.0.0.219) → /tmp/assist_satellite.py
-3. cat /tmp/assist_satellite.py | ssh noodles@10.0.0.54 'sudo tee /homeassistant/custom_components/wyoming_satellite_plus/assist_satellite.py > /dev/null'
-4. ssh noodles@10.0.0.54 'sudo rm -rf /homeassistant/custom_components/wyoming_satellite_plus/__pycache__'
-5. Call HA service: homeassistant.reload_all  (NOT a full restart — flushes sys.modules for custom components)
+```bash
+curl -X POST -H "Authorization: Bearer $HA_TOKEN" \
+  http://10.0.0.54:8123/api/services/homeassistant/restart
+```
 
-## Key constants / IDs
-- HA host: 10.0.0.54:8123
-- Satellite host: 10.0.0.219:10700
-- Config entry ID: 01KRC0A7SPJZ1XVRZ2X2WN3YVQ
-- Entity: assist_satellite.jarvis
-- Pipeline: Jarvis (id 01kr8v407r3jehzxmsrhgdnzjy) — STT=Whisper, LLM=Claude via ha-proxy, TTS=Google en-GB-Neural2-D
-- Secrets: C:\Users\pwsha\.openclaw\secrets\homeassistant.json
+## Connection hygiene
 
-## Other known issues
-- `_run_pipeline_once` takes a RunPipeline object. For continuation we pass
-  one with start_stage=ASR, end_stage=TTS. This works.
-- The satellite sends RunPipeline(ASR) back to HA when we tell it to open mic.
-  The `_run_pipeline_loop` has a guard (`_start_conversation_active` flag or
-  similar) to avoid double-running the pipeline. Verify this is still in place.
-- The wyoming-satellite `--done-wav` plays AFTER the satellite receives AudioStop
-  and finishes draining the paplay buffer. The playback_wait calculation
-  (total_seconds + 0.5s) should be long enough, but test with a short question
-  like "Which lights?" (~0.8s audio) and a longer one (~3s) to confirm.
+Observed during debugging: HA restarts can leave a stale TCP connection
+in `CLOSE-WAIT` on the satellite side (the satellite holds the FD even
+after HA closes its end). Doesn't break things on its own (the satellite
+accepts a fresh connection too) but is worth knowing about. A satellite
+restart clears it.
 
-## Test sequence
-1. "Hey Jarvis, turn off the lights"
-2. Jarvis: "Which lights?" + done chime
-3. [mic should open automatically — awake sound should play]
-4. Say "office light"
-5. Jarvis should confirm and turn off office light
-6. No re-wake needed for steps 3-5
+Check with:
+```bash
+ssh root@10.0.0.219 "ss -tnp | grep ':10700'"
+```
