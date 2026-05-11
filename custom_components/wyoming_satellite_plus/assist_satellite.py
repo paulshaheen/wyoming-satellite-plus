@@ -569,6 +569,10 @@ class WyomingAssistSatellite(WyomingSatelliteEntity, AssistSatelliteEntity):
         send_ping = True
         self._run_loop_id = ulid_now()
 
+        # Ensure the event is clear so pipeline_ended_task doesn't fire immediately
+        # if a previous pipeline ended during a reload or reconnect.
+        self._pipeline_ended_event.clear()
+
         pipeline_ended_task = self.config_entry.async_create_background_task(
             self.hass, self._pipeline_ended_event.wait(), "satellite pipeline ended"
         )
@@ -577,6 +581,7 @@ class WyomingAssistSatellite(WyomingSatelliteEntity, AssistSatelliteEntity):
         )
         pending = {pipeline_ended_task, client_event_task}
 
+        # Request updated info from satellite (optional, used for wake word name resolution)
         await self._client.write_event(Describe().event())
 
         while self.is_running and (not self.device.is_muted):
